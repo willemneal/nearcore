@@ -6,6 +6,8 @@ use std::process::Command;
 
 use alphanet::testing_utils::{check_result, configure_chain_spec, Node, wait};
 use primitives::transaction::TransactionBody;
+use alphanet::testing_utils::generate_test_chain_spec;
+use log::*;
 
 #[test]
 fn test_two_nodes() {
@@ -48,8 +50,9 @@ fn test_two_nodes() {
 fn test_multiple_nodes() {
     // Modify the following two variables to run more nodes or to exercise them for multiple
     // trials.
-    let num_nodes = 2;
+    let num_nodes = 4;
     let num_trials = 1;
+    let trial_duration = 60000;
 
     let init_balance = 1_000_000_000;
     let mut account_names = vec![];
@@ -59,8 +62,7 @@ fn test_multiple_nodes() {
         node_names.push(format!("node_{}", i));
     }
 
-    let chain_spec = configure_chain_spec();
-//    let chain_spec = generate_test_chain_spec(&account_names, init_balance);
+    let chain_spec = generate_test_chain_spec(&account_names, init_balance);
 
     let mut nodes = vec![];
     let mut boot_nodes = vec![];
@@ -86,7 +88,6 @@ fn test_multiple_nodes() {
     // the balance of j on node k.
     let mut expected_balances = vec![init_balance; num_nodes];
     let mut nonces = vec![1; num_nodes];
-    let trial_duration = 10000;
     for trial in 0..num_trials {
         println!("TRIAL #{}", trial);
         let i = rand::random::<usize>() % num_nodes;
@@ -95,37 +96,49 @@ fn test_multiple_nodes() {
         if j >= i {
             j += 1;
         }
-        for k in 0..num_nodes {
-            nodes[k]
-                .client
-                .shard_client
-                .pool
-                .add_transaction(
-                    TransactionBody::send_money(
-                        nonces[i],
-                        account_names[i].as_str(),
-                        account_names[j].as_str(),
-                        1,
-                    )
-                        .sign(nodes[i].signer()),
+
+        nodes[i]
+            .client
+            .shard_client
+            .pool
+            .add_transaction(
+                TransactionBody::send_money(
+                    nonces[i],
+                    account_names[i].as_str(),
+                    account_names[j].as_str(),
+                    1,
                 )
-                .unwrap();
-        }
+                    .sign(nodes[i].signer()),
+            )
+            .unwrap();
+
         nonces[i] += 1;
         expected_balances[i] -= 1;
         expected_balances[j] += 1;
 
         wait(
             || {
-                let mut state_update = nodes[j].client.shard_client.get_state_update();
-                let amt = nodes[j]
-                    .client
-                    .shard_client
-                    .trie_viewer
-                    .view_account(&mut state_update, &account_names[j])
-                    .unwrap()
-                    .amount;
-                expected_balances[j] == amt
+                let mut ok = vec![false; num_nodes];
+                let mut total = 0;
+
+                for k in 0..num_nodes {
+                    let mut state_update = nodes[j].client.shard_client.get_state_update();
+                    let amt = nodes[j]
+                        .client
+                        .shard_client
+                        .trie_viewer
+                        .view_account(&mut state_update, &account_names[j])
+                        .unwrap()
+                        .amount;
+                    ok[k] = expected_balances[j] == amt;
+
+                    if ok[k] {
+                        total += 1;
+                    }
+                }
+
+                info!(target: "alphanet", "Ok nodes {}/{}: {:?}", total, num_nodes, ok);
+                total == num_nodes
             },
             1000,
             trial_duration,
