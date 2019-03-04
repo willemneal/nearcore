@@ -147,6 +147,7 @@ impl Stream for ClientTask {
 
         // First, send the control, if applicable.
         if let Some(ind) = new_block_index {
+            // TODO: Use hash of the new block not the payload (New block contains also hash of the previous block)
             let hash = self.client.shard_client.pool.snapshot_payload();
             let next_index = ind + 1;
             let control = self.get_control(next_index, hash);
