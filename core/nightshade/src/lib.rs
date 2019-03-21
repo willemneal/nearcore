@@ -13,5 +13,7 @@ mod testing_utils;
 #[cfg(test)]
 mod fake_network;
 
+#[cfg(test)]
 pub mod loom_ns_task;
+#[cfg(test)]
 pub mod loom_fake_network;

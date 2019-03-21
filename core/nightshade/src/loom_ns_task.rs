@@ -1,30 +1,14 @@
-use crate::nightshade::{BlockProposal, ConsensusBlockProposal, Nightshade, State};
+use crate::nightshade::{BlockProposal, Nightshade, State};
 use log::*;
 use primitives::aggregate_signature::BlsPublicKey;
 use primitives::hash::{hash_struct, CryptoHash};
 use primitives::signature::{verify, PublicKey, Signature};
 use primitives::signer::BlockSigner;
 use primitives::types::{AuthorityId, BlockIndex};
-use std::ops::DerefMut;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Condvar;
 use std::sync::Mutex;
-use std::thread;
-use std::thread::JoinHandle;
-
-#[derive(Clone, Debug)]
-pub enum Control {
-    Reset {
-        owner_uid: AuthorityId,
-        block_index: BlockIndex,
-        hash: CryptoHash,
-        public_keys: Vec<PublicKey>,
-        bls_public_keys: Vec<BlsPublicKey>,
-    },
-    Stop,
-    PayloadConfirmation(AuthorityId, CryptoHash),
-    End,
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Message {
@@ -91,6 +75,8 @@ impl SignedBlockProposal {
     }
 }
 
+
+
 pub struct NightshadeTask {
     /// Signer.
     signer: Arc<BlockSigner>,
@@ -98,44 +84,46 @@ pub struct NightshadeTask {
     /// authorities only have their own block. It is required for an authority to endorse a block
     /// from other authority to have its block.
     proposals: Vec<Option<SignedBlockProposal>>,
-    /// Flags indicating if the proposing blocks can be fetched from the mempool.
-    /// Mempool task should send the signal to confirm a proposal
-    confirmed_proposals: Vec<bool>,
     /// Nightshade main data structure.
     nightshade: Option<Nightshade>,
     /// Block index that we are currently working on.
     block_index: Option<u64>,
     /// Standard public/secret keys are used to sign payloads and gossips
     public_keys: Vec<PublicKey>,
-    /// Channel to send gossips to other authorities
-    out_gossips: Arc<(Mutex<Vec<Gossip>>, Condvar)>,
-    /// Consensus header and block index on which the consensus was reached.
-    consensus_sender: Arc<(Mutex<Vec<ConsensusBlockProposal>>, Condvar)>,
-    /// Send block proposal info to retrieve payload.
-    retrieve_payload_tx: Arc<(Mutex<Vec<(AuthorityId, CryptoHash)>>, Condvar)>,
-    /// Flag to determine if consensus was already reported in the consensus channel.
+    /// Receiver -> Gossips map
+    gossips: Arc<Mutex<HashMap<AuthorityId, Vec<Gossip>>>>,
+    /// AuthorityId -> BlockProposal.
+    commitments: Arc<Mutex<HashMap<AuthorityId, BlockProposal>>>,
+    /// Number of messages this task is allowed to send.
+    messages_quota: RefCell<i64>,
     consensus_reported: bool,
 }
 
 impl NightshadeTask {
     pub fn new(
+        owner_uid: AuthorityId,
+        block_index: BlockIndex,
+        hash: CryptoHash,
+        public_keys: Vec<PublicKey>,
+        bls_public_keys: Vec<BlsPublicKey>,
         signer: Arc<BlockSigner>,
-        out_gossips: Arc<(Mutex<Vec<Gossip>>, Condvar)>,
-        consensus_sender: Arc<(Mutex<Vec<ConsensusBlockProposal>>, Condvar)>,
-        retrieve_payload_tx: Arc<(Mutex<Vec<(AuthorityId, CryptoHash)>>, Condvar)>,
+        gossips: Arc<Mutex<HashMap<AuthorityId, Vec<Gossip>>>>,
+        commitments: Arc<Mutex<HashMap<AuthorityId, BlockProposal>>>,
+        messages_quota: i64,
     ) -> Self {
-        Self {
+        let mut res = Self {
             signer,
             proposals: vec![],
-            confirmed_proposals: vec![],
             nightshade: None,
             block_index: None,
             public_keys: vec![],
-            out_gossips,
-            consensus_sender,
-            retrieve_payload_tx,
+            gossips,
+            commitments,
+            messages_quota: RefCell::new(messages_quota),
             consensus_reported: false,
-        }
+        };
+        res.init_nightshade(owner_uid, block_index, hash, public_keys, bls_public_keys);
+        res
     }
 
     fn nightshade_as_ref(&self) -> &Nightshade {
@@ -166,8 +154,6 @@ impl NightshadeTask {
         self.proposals = vec![None; num_authorities];
         self.proposals[owner_uid] =
             Some(SignedBlockProposal::new(owner_uid, hash, self.signer.clone()));
-        self.confirmed_proposals = vec![false; num_authorities];
-        self.confirmed_proposals[owner_uid] = true;
         self.block_index = Some(block_index);
         self.public_keys = public_keys;
         self.nightshade = Some(Nightshade::new(
@@ -199,8 +185,13 @@ impl NightshadeTask {
     }
 
     fn send_gossip(&self, message: Gossip) {
-        self.out_gossips.0.lock().unwrap().push(message);
-        self.out_gossips.1.notify_one();
+        self.gossips
+            .lock()
+            .unwrap()
+            .entry(message.receiver_id)
+            .or_insert_with(Vec::new)
+            .push(message);
+        *self.messages_quota.borrow_mut() -= 1;
     }
 
     #[allow(dead_code)]
@@ -215,16 +206,10 @@ impl NightshadeTask {
         // Check if we already receive this proposal.
         if let Some(signed_proposal) = &self.proposals[author] {
             if signed_proposal.block_proposal.hash == message.state.block_hash() {
-                // Check if this proposal was already confirmed by the mempool
-                if self.confirmed_proposals[author] {
-                    if let Err(e) =
-                        self.nightshade_as_mut_ref().update_state(message.sender_id, message.state)
-                    {
-                        warn!(target: "nightshade", "{}", e);
-                    }
-                } else {
-                    // Wait for confirmation from mempool,
-                    // request was already sent when the proposal arrived.
+                if let Err(e) =
+                    self.nightshade_as_mut_ref().update_state(message.sender_id, message.state)
+                {
+                    warn!(target: "nightshade", "{}", e);
                 }
             } else {
                 // There is at least one malicious actor between the sender of this message
@@ -279,19 +264,6 @@ impl NightshadeTask {
         self.send_gossip(gossip);
     }
 
-    fn request_payload_confirmation(&self, signed_payload: &SignedBlockProposal) {
-        debug!(
-            "owner_uid={:?}, block_index={:?}, Request payload confirmation: {:?}",
-            self.nightshade.as_ref().unwrap().owner_id,
-            self.block_index,
-            signed_payload
-        );
-        let authority = signed_payload.block_proposal.author;
-        let hash = signed_payload.block_proposal.hash;
-        self.retrieve_payload_tx.0.lock().unwrap().push((authority, hash));
-        self.retrieve_payload_tx.1.notify_one();
-    }
-
     fn receive_payloads(&mut self, sender_id: AuthorityId, payloads: Vec<SignedBlockProposal>) {
         for signed_payload in payloads {
             let authority_id = signed_payload.block_proposal.author;
@@ -310,7 +282,6 @@ impl NightshadeTask {
                     panic!("the case of adversaries creating forks is not properly handled yet");
                 }
             } else {
-                self.request_payload_confirmation(&signed_payload);
                 self.proposals[authority_id] = Some(signed_payload);
             }
         }
@@ -342,98 +313,24 @@ impl NightshadeTask {
         self.nightshade_as_ref().owner_id
     }
 
-    /// Returns false when the processing is finished.
-    fn process(
-        &mut self,
-        inc_gossip_control: &Arc<(Mutex<(Vec<Gossip>, Vec<Control>)>, Condvar)>,
-    ) -> bool {
-        let mut guard = inc_gossip_control.0.lock().unwrap();
-        guard = inc_gossip_control.1.wait(guard).unwrap();
-        let (gossips, controls) = guard.deref_mut();
+    pub fn run(&mut self) {
+        loop {
+            let gossips: Vec<_> = self.gossips.lock().unwrap().entry(self.owner_id()).or_insert_with(Vec::new).drain(..).collect();
+            for gossip in gossips {
+                self.process_gossip(gossip);
 
-        // Control loop
-        for control in controls.drain(..) {
-            match control {
-                Control::Reset { owner_uid, block_index, hash, public_keys, bls_public_keys } => {
-                    debug!(target: "nightshade",
-                          "Control channel received Reset for owner_uid={}, block_index={}, hash={:?}",
-                          owner_uid, block_index, hash);
-                    self.init_nightshade(
-                        owner_uid,
-                        block_index,
-                        hash,
-                        public_keys,
-                        bls_public_keys,
-                    );
-                }
-                Control::Stop => {
-                    debug!(target: "nightshade", "Control channel received Stop");
-                    if self.nightshade.is_some() {
-                        self.nightshade = None;
-                        // On the next call of poll if we still don't have the state this task will be
-                        // parked because we will return NotReady.
-                        continue;
-                    }
-                    // Otherwise loop until we encounter Reset command in the stream. If the stream
-                    // is NotReady this will automatically park the task.
-                }
-                Control::PayloadConfirmation(authority_id, hash) => {
-                    debug!(target: "nightshade", "Received confirmation for ({}, {:?})", authority_id, hash);
-                    // Check that we got confirmation for the current proposal
-                    // and not for a proposal in a previous block index
-                    if let Some(signed_block) = &self.proposals[authority_id] {
-                        if signed_block.block_proposal.hash == hash {
-                            self.confirmed_proposals[authority_id] = true;
-                        }
-                    }
-
-                    if !self.confirmed_proposals[authority_id] {
-                        warn!(target: "nightshade", "Outdated confirmation.");
-                    }
-                }
-                Control::End => {
-                    debug!(target: "nightshade", "Control channel was dropped");
-                    return false;
-                }
-            };
-        }
-
-        for gossip in gossips.drain(..) {
-            self.process_gossip(gossip);
-
-            // Report as soon as possible when an authority reach consensus on some outcome
-            if !self.consensus_reported {
-                if let Some(outcome) = self.nightshade_as_ref().committed.clone() {
-                    self.consensus_reported = true;
-
-                    if self.confirmed_proposals[outcome.author] {
-                        self.consensus_sender.0.lock().unwrap().push(ConsensusBlockProposal {
-                            proposal: outcome,
-                            index: self.block_index.unwrap(),
-                        });
-                        self.consensus_sender.1.notify_one();
-                    } else {
-                        warn!(target: "nightshade", "Consensus reached on block proposal {} from {} that wasn't fetched.", outcome.hash, outcome.author);
+                // Report as soon as possible when an authority reach consensus on some outcome
+                if !self.consensus_reported {
+                    if let Some(outcome) = self.nightshade_as_ref().committed.clone() {
+                        self.consensus_reported = true;
+                        self.commitments.lock().unwrap().insert(self.owner_id(), outcome);
                     }
                 }
             }
+            self.gossip_state();
+            if *self.messages_quota.borrow() <= 0 {
+                break;
+            }
         }
-
-        self.gossip_state();
-        true
     }
-}
-
-pub fn spawn_nightshade_task(
-    signer: Arc<BlockSigner>,
-    inc_gossip_control: Arc<(Mutex<(Vec<Gossip>, Vec<Control>)>, Condvar)>,
-    out_gossips: Arc<(Mutex<Vec<Gossip>>, Condvar)>,
-    consensus_sender: Arc<(Mutex<Vec<ConsensusBlockProposal>>, Condvar)>,
-    retrieve_payload_tx: Arc<(Mutex<Vec<(AuthorityId, CryptoHash)>>, Condvar)>,
-) -> JoinHandle<()> {
-    thread::spawn(move || {
-        let mut task =
-            NightshadeTask::new(signer, out_gossips, consensus_sender, retrieve_payload_tx);
-        while task.process(&inc_gossip_control) {}
-    })
 }
