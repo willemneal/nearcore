@@ -10,19 +10,15 @@ use crate::loom_ns_task::NightshadeTask;
 use crate::nightshade::BlockProposal;
 use primitives::types::AuthorityId;
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::thread;
-
-#[derive(Clone, Debug, Serialize)]
-struct DummyPayload {
-    dummy: u64,
-}
+use loom::sync::Mutex;
+use loom::thread;
+use loom::fuzz::Builder;
 
 fn spawn_all(num_authorities: usize) {
-    let messages_per_node = 1_00i64;
+    let messages_per_node = 1_0i64;
     let mut handles = vec![];
-    let gossips: Arc<Mutex<HashMap<AuthorityId, Vec<Gossip>>>> = Default::default();
-    let commitments: Arc<Mutex<HashMap<AuthorityId, BlockProposal>>> = Default::default();
+    let gossips: Arc<Mutex<HashMap<AuthorityId, Vec<Gossip>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let commitments: Arc<Mutex<HashMap<AuthorityId, BlockProposal>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let signers: Vec<Arc<InMemorySigner>> =
         (0..num_authorities).map(|_| Arc::new(InMemorySigner::default())).collect();
@@ -67,40 +63,39 @@ fn spawn_all(num_authorities: usize) {
     }
 }
 
+fn limited_builder() -> Builder {
+    let mut builder = Builder::new();
+    builder
+}
+
 #[cfg(test)]
 mod tests {
-    use super::spawn_all;
-
-    #[test]
-    #[ignore]
-    #[should_panic]
-    /// One authority don't reach consensus by itself in the current implementation
-    fn one_authority() {
-        spawn_all(1);
-    }
+    use super::{spawn_all, limited_builder};
 
     #[test]
     fn two_authorities() {
-        spawn_all(2);
+        limited_builder().fuzz(move || {
+            spawn_all(2);
+        });
     }
 
-    #[test]
-    fn three_authorities() {
-        spawn_all(3);
-    }
-
-    #[test]
-    fn four_authorities() {
-        spawn_all(4);
-    }
-
-    #[test]
-    fn five_authorities() {
-        spawn_all(5);
-    }
-
-    #[test]
-    fn ten_authorities() {
-        spawn_all(10);
-    }
+//    #[test]
+//    fn three_authorities() {
+//        spawn_all(3);
+//    }
+//
+//    #[test]
+//    fn four_authorities() {
+//        spawn_all(4);
+//    }
+//
+//    #[test]
+//    fn five_authorities() {
+//        spawn_all(5);
+//    }
+//
+//    #[test]
+//    fn ten_authorities() {
+//        spawn_all(10);
+//    }
 }

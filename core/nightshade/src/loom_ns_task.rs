@@ -8,7 +8,7 @@ use primitives::types::{AuthorityId, BlockIndex};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
+use loom::sync::Mutex;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Message {
