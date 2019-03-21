@@ -12,3 +12,5 @@ mod testing_utils;
 
 #[cfg(test)]
 mod fake_network;
+
+pub mod ns_loom_task;
