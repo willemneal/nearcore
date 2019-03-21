@@ -15,7 +15,7 @@ use loom::thread;
 use loom::fuzz::Builder;
 
 fn spawn_all(num_authorities: usize) {
-    let messages_per_node = 1_0i64;
+    let messages_per_node = 1_00i64;
     let mut handles = vec![];
     let gossips: Arc<Mutex<HashMap<AuthorityId, Vec<Gossip>>>> = Arc::new(Mutex::new(HashMap::new()));
     let commitments: Arc<Mutex<HashMap<AuthorityId, BlockProposal>>> = Arc::new(Mutex::new(HashMap::new()));
