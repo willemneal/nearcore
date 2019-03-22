@@ -316,7 +316,12 @@ impl NightshadeTask {
     pub fn run(&mut self) {
         loop {
             let gossips: Vec<_> = self.gossips.lock().unwrap().entry(self.owner_id()).or_insert_with(Vec::new).drain(..).collect();
+            let mut prev_gossip_sig = None;
             for gossip in gossips {
+                if prev_gossip_sig.is_some() && prev_gossip_sig.as_ref().unwrap() == &gossip.signature {
+                    continue;
+                }
+                prev_gossip_sig = Some(gossip.signature.clone());
                 self.process_gossip(gossip);
 
                 // Report as soon as possible when an authority reach consensus on some outcome
