@@ -2,10 +2,24 @@ use std::thread;
 use std::time::Duration;
 
 use primitives::transaction::TransactionBody;
+use primitives::types::{AccountId, BlockIndex};
 use testlib::alphanet_utils::create_nodes;
 use testlib::alphanet_utils::sample_two_nodes;
 use testlib::alphanet_utils::wait;
 use testlib::alphanet_utils::Node;
+
+fn debug(nodes: &Vec<Box<Node>>) {
+    let account_names: Vec<AccountId> =
+        nodes.iter().map(|node| node.config().client_cfg.account_id.clone()).collect();
+    let all_block_indices: Vec<BlockIndex> =
+        nodes.iter().map(|node| node.user().get_best_block_index()).collect();
+    let node = nodes[0].as_ref();
+    let all_balances: Vec<_> =
+        account_names.iter().map(|acc| (acc, node.view_balance(acc).unwrap())).collect();
+
+    println!("Best block index: {:?}", all_block_indices);
+    println!("Balances: {:?}", all_balances);
+}
 
 fn run_multiple_nodes(num_nodes: usize, num_trials: usize, test_prefix: &str, test_port: u16) {
     let (init_balance, account_names, mut nodes) = create_nodes(num_nodes, test_prefix, test_port);
@@ -22,8 +36,10 @@ fn run_multiple_nodes(num_nodes: usize, num_trials: usize, test_prefix: &str, te
     let trial_duration = 10000;
     for trial in 0..num_trials {
         println!("TRIAL #{}", trial);
+        debug(&nodes);
         let (i, j) = sample_two_nodes(num_nodes);
         let (k, r) = sample_two_nodes(num_nodes);
+        println!("i,j {:?}, k,r {:?}", (i, j), (k, r));
         let nonce = nodes[i].get_account_nonce(&account_names[i]).unwrap_or_default() + 1;
         let transaction = TransactionBody::send_money(
             nonce,
