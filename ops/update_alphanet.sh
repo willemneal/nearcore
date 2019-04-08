@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-IMAGE=${1:-nearprotocol/alphanet:0.1.3}
+IMAGE=${1:-nearprotocol/test1}
 PREFIX=${2:-alphanet}
 ZONE=${3:-us-west2-a}
 
