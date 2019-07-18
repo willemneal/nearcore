@@ -20,6 +20,7 @@ use near_network::NetworkConfig;
 use near_primitives::crypto::signer::{EDSigner, InMemorySigner, KeyFile};
 use near_primitives::serialize::{to_base, u128_hex_format};
 use near_primitives::types::{AccountId, Balance, BlockIndex, ReadablePublicKey, ValidatorId};
+use node_runtime::StateRecord;
 
 /// Initial balance used in tests.
 pub const TESTING_INIT_BALANCE: Balance = 1_000_000_000_000_000;
@@ -292,6 +293,7 @@ pub struct GenesisConfig {
     pub accounts: Vec<AccountInfo>,
     /// List of contract code per accounts. Contract code encoded in base64.
     pub contracts: Vec<(AccountId, String)>,
+    pub records: Vec<Vec<StateRecord>>,
 }
 
 impl GenesisConfig {
@@ -328,6 +330,7 @@ impl GenesisConfig {
             validators,
             accounts,
             contracts,
+            records: vec![],
         }
     }
 
@@ -366,6 +369,7 @@ impl GenesisConfig {
             validators,
             accounts,
             contracts: vec![],
+            records: vec![],
         }
     }
 
@@ -378,7 +382,7 @@ impl GenesisConfig {
     }
 
     /// Writes GenesisConfig to the file.
-    pub fn write_to_file(&self, path: &PathBuf) {
+    pub fn write_to_file(&self, path: &Path) {
         let mut file = File::create(path).expect("Failed to create / write a genesis config file.");
         let str =
             serde_json::to_string_pretty(self).expect("Error serializing the genesis config.");
@@ -423,6 +427,7 @@ pub fn testnet_genesis() -> GenesisConfig {
             amount: INITIAL_TOKEN_SUPPLY,
         }],
         contracts: vec![],
+        records: vec![],
     }
 }
 
@@ -517,6 +522,7 @@ pub fn init_configs(
                     amount: TESTING_INIT_BALANCE,
                 }],
                 contracts: vec![],
+                records: vec![],
             };
             genesis_config.write_to_file(&dir.join(config.genesis_file));
             info!(target: "near", "Generated node key, validator key, genesis file in {}", dir.to_str().unwrap());
@@ -564,6 +570,7 @@ pub fn create_testnet_configs_from_seeds(
         validators,
         accounts,
         contracts: vec![],
+        records: vec![],
     };
     let mut configs = vec![];
     let first_node_port = open_port();

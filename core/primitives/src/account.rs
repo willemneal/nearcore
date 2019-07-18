@@ -14,7 +14,7 @@ use crate::serialize::u128_hex_format;
 use crate::types::{AccountId, Balance, BlockIndex, Nonce, StorageUsage};
 
 /// Per account information stored in the state.
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
 pub struct Account {
     pub public_keys: Vec<PublicKey>,
     pub nonce: Nonce,

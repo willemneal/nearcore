@@ -1,20 +1,23 @@
 use std::convert::TryFrom;
 use std::path::Path;
+use std::sync::Arc;
 
 use clap::{App, Arg, SubCommand};
 
-use near::{get_default_home, get_store_path, load_config, NightshadeRuntime};
+use near::{get_default_home, get_store_path, load_config, NearConfig, NightshadeRuntime};
 use near_chain::{ChainStore, ChainStoreAccess};
 use near_network::peer_store::PeerStore;
 use near_primitives::account::{AccessKey, Account};
 use near_primitives::crypto::signature::PublicKey;
-use near_primitives::hash::hash;
-use near_primitives::serialize::Decode;
+use near_primitives::hash::{CryptoHash, hash};
+use near_primitives::serialize::{Decode, to_base64};
 use near_primitives::test_utils::init_integration_logger;
 use near_primitives::transaction::Callback;
+use near_primitives::types::BlockIndex;
 use near_primitives::utils::col;
-use near_store::{create_store, DBValue, TrieIterator};
+use near_store::{create_store, DBValue, Store, TrieIterator};
 use node_runtime::ext::ACCOUNT_DATA_SEPARATOR;
+use node_runtime::StateRecord;
 
 fn to_printable(blob: &[u8]) -> String {
     if blob.len() > 60 {
@@ -28,6 +31,36 @@ fn to_printable(blob: &[u8]) -> String {
             Ok(v) => format!(" {}", v),
             Err(_e) => format!("0x{}", hex::encode(blob)),
         }
+    }
+}
+
+fn kv_to_state_record(key: Vec<u8>, value: DBValue) -> StateRecord {
+    let column = &key[0..1];
+    match column {
+        col::ACCOUNT => {
+            let separator = (1..key.len()).find(|&x| key[x] == ACCOUNT_DATA_SEPARATOR[0]);
+            if let Some(_separator) = separator {
+                StateRecord::Data { key: to_base64(&key), value: to_base64(&value) }
+            } else {
+                let account: Account = Decode::decode(&value).unwrap();
+                StateRecord::Account { account_id: to_printable(&key[1..]), account }
+            }
+        }
+        col::CALLBACK => {
+            let callback: Callback = Decode::decode(&value).unwrap();
+            StateRecord::Callback { id: key[1..].to_vec(), callback }
+        }
+        col::CODE => {
+            StateRecord::Contract { account_id: to_printable(&key[1..]), code: to_base64(&value) }
+        }
+        col::ACCESS_KEY => {
+            let separator = (1..key.len()).find(|&x| key[x] == col::ACCESS_KEY[0]).unwrap();
+            let access_key: AccessKey = Decode::decode(&value).unwrap();
+            let account_id = to_printable(&key[1..separator]);
+            let public_key = PublicKey::try_from(&key[(separator + 1)..]).unwrap();
+            StateRecord::AccessKey { account_id, public_key, access_key }
+        }
+        _ => unimplemented!(),
     }
 }
 
@@ -78,6 +111,20 @@ fn print_state_entry(key: Vec<u8>, value: DBValue) {
     }
 }
 
+fn load_trie(
+    store: Arc<Store>,
+    home_dir: &Path,
+    near_config: &NearConfig,
+) -> (NightshadeRuntime, CryptoHash, BlockIndex) {
+    let mut chain_store = ChainStore::new(store.clone());
+
+    let runtime = NightshadeRuntime::new(&home_dir, store, near_config.genesis_config.clone());
+    let head = chain_store.head().unwrap();
+    let last_header = chain_store.get_block_header(&head.last_block_hash).unwrap().clone();
+    let state_root = chain_store.get_post_state_root(&head.last_block_hash).unwrap();
+    (runtime, *state_root, last_header.height)
+}
+
 fn main() {
     init_integration_logger();
 
@@ -92,10 +139,19 @@ fn main() {
         )
         .subcommand(SubCommand::with_name("peers"))
         .subcommand(SubCommand::with_name("state"))
+        .subcommand(
+            SubCommand::with_name("dump_state").arg(
+                Arg::with_name("output")
+                    .long("output")
+                    .required(true)
+                    .help("Output path for new genesis given current blockchain state")
+                    .takes_value(true),
+            ),
+        )
         .get_matches();
 
     let home_dir = matches.value_of("home").map(|dir| Path::new(dir)).unwrap();
-    let near_config = load_config(home_dir);
+    let mut near_config = load_config(home_dir);
 
     let store = create_store(&get_store_path(&home_dir));
 
@@ -107,19 +163,25 @@ fn main() {
             }
         }
         ("state", Some(_args)) => {
-            let mut chain_store = ChainStore::new(store.clone());
-
-            let runtime = NightshadeRuntime::new(&home_dir, store, near_config.genesis_config);
-            let head = chain_store.head().unwrap();
-            let last_header = chain_store.get_block_header(&head.last_block_hash).unwrap().clone();
-            let state_root = chain_store.get_post_state_root(&head.last_block_hash).unwrap();
-            let trie = TrieIterator::new(&runtime.trie, state_root).unwrap();
-
-            println!("Storage root is {}, block height is {}", state_root, last_header.height);
+            let (runtime, state_root, height) = load_trie(store, &home_dir, &near_config);
+            println!("Storage root is {}, block height is {}", state_root, height);
+            let trie = TrieIterator::new(&runtime.trie, &state_root).unwrap();
             for item in trie {
                 let (key, value) = item.unwrap();
                 print_state_entry(key, value);
             }
+        }
+        ("dump_state", Some(args)) => {
+            let (runtime, state_root, height) = load_trie(store, home_dir, &near_config);
+            let output_path = args.value_of("output").map(|path| Path::new(path)).unwrap();
+            println!("Saving state at {} @ {} into {}", state_root, height, output_path.display());
+            near_config.genesis_config.records = vec![vec![]];
+            let trie = TrieIterator::new(&runtime.trie, &state_root).unwrap();
+            for item in trie {
+                let (key, value) = item.unwrap();
+                near_config.genesis_config.records[0].push(kv_to_state_record(key, value));
+            }
+            near_config.genesis_config.write_to_file(&output_path);
         }
         (_, _) => unreachable!(),
     }
