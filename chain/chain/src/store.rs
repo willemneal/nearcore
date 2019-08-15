@@ -514,6 +514,31 @@ impl<'a, T: ChainStoreAccess> ChainStoreUpdate<'a, T> {
 
         Ok(ret)
     }
+
+    pub fn get_outgoing_receipts_for_shard(
+        &mut self,
+        prev_block_hash: CryptoHash,
+        shard_id: ShardId,
+        last_included_height: BlockIndex,
+    ) -> Result<(CryptoHash, Vec<ReceiptTransaction>), Error> {
+        let mut receipts_block_hash = prev_block_hash.clone();
+        loop {
+            let block_header = self.get_block_header(&receipts_block_hash)?;
+
+            if block_header.height == last_included_height {
+                let receipts = if let Ok(cur_receipts) =
+                self.get_outgoing_receipts(&receipts_block_hash, shard_id)
+                {
+                    cur_receipts.clone()
+                } else {
+                    vec![]
+                };
+                return Ok((receipts_block_hash, receipts));
+            } else {
+                receipts_block_hash = block_header.prev_hash.clone();
+            }
+        }
+    }
 }
 
 impl<'a, T: ChainStoreAccess> ChainStoreAccess for ChainStoreUpdate<'a, T> {
@@ -603,7 +628,7 @@ impl<'a, T: ChainStoreAccess> ChainStoreAccess for ChainStoreUpdate<'a, T> {
         self.chain_store.get_block_hash_by_height(height)
     }
 
-    /// Get receipts produced for block with givien hash.
+    /// Get receipts produced for block with given hash.
     fn get_outgoing_receipts(
         &mut self,
         hash: &CryptoHash,

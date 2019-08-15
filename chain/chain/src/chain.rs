@@ -7,6 +7,7 @@ use chrono::Duration;
 use log::{debug, info};
 
 use near_primitives::hash::CryptoHash;
+use near_primitives::merkle::merklize;
 use near_primitives::sharding::{ChunkHash, ShardChunk, ShardChunkHeader};
 use near_primitives::transaction::{ReceiptTransaction, TransactionResult};
 use near_primitives::types::{AccountId, Balance, BlockIndex, ChunkExtra, GasUsage, ShardId};
@@ -1230,6 +1231,34 @@ impl<'a> ChainUpdate<'a> {
                         // TODO: MOO
                         assert!(false);
                         return Err(ErrorKind::InvalidStateRoot.into());
+                    }
+
+                    let (_, outgoing_receipts) = self.chain_store_update.get_outgoing_receipts_for_shard(
+                        block.header.prev_hash,
+                        shard_id,
+                        prev_chunk_header.height_included
+                    )?;
+                    let outgoing_receipts_hashes = self.runtime_adapter.build_receipts_hashes(&outgoing_receipts);
+                    let (outgoing_receipts_root, _) = merklize(&outgoing_receipts_hashes);
+
+                    if outgoing_receipts_root != chunk_header.receipts_root {
+                        // TODO: MOO
+                        println!(
+                            "[FAILED APPLYING CHUNK] {:?} PREV BLOCK HASH: {:?}, BLOCK HASH: {:?} ROOT: {:?}",
+                            chunk_header.height_included,
+                            chunk_header.prev_block_hash,
+                            block.hash(),
+                            chunk_header.prev_state_root
+                        );
+                        println!(
+                            "RECEIPTS_LEN {:?} RECEIPTS_ROOT {:?} chunk_header.receipts_root {:?} prev_chunk_header.receipts_root {:?}",
+                            outgoing_receipts.len(),
+                            outgoing_receipts_root,
+                            chunk_header.receipts_root,
+                            prev_chunk_header.receipts_root
+                        );
+                        assert!(false);
+                        return Err(ErrorKind::InvalidReceiptsRoot.into());
                     }
 
                     let receipts: Vec<ReceiptTransaction> = self
